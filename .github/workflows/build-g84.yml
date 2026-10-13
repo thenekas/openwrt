@@ -1,0 +1,131 @@
+name: Build Iskratel Innbox G84 Firmware
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+      with:
+        ref: econet-xpon-gpon
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y build-essential gawk flex bison gettext \
+          autoconf automake libtool texinfo git libncurses5-dev libssl-dev \
+          python3 python3-setuptools rsync unzip zlib1g-dev file wget xsltproc \
+          libelf-dev binutils-dev libfuse-dev perl bsdmainutils swig
+
+    - name: Update feeds
+      run: |
+        ./scripts/feeds update -a
+        ./scripts/feeds install -a
+
+    - name: Add G84 DTS
+      run: |
+        cat > target/linux/econet/dts/en7528_iskratel_innbox-g84.dts << 'EOF'
+        // SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+        /dts-v1/;
+        #include "en7528.dtsi"
+        #include <dt-bindings/gpio/gpio.h>
+        #include <dt-bindings/input/input.h>
+        #include <dt-bindings/leds/common.h>
+        / {
+            model = "Iskratel Innbox G84";
+            compatible = "iskratel,innbox-g84", "econet,en7528";
+            aliases { serial0 = &uart; };
+            memory@0 { device_type = "memory"; reg = <0x00000000 0x10000000>; };
+            chosen { stdout-path = "serial0:115200n8"; linux,usable-memory-range = <0x00020000 0x0ffe0000>; };
+            leds { compatible = "gpio-leds";
+                power { color = <LED_COLOR_ID_GREEN>; function = LED_FUNCTION_POWER; gpios = <&gpio0 3 GPIO_ACTIVE_LOW>; default-state = "on"; };
+            };
+            keys { compatible = "gpio-keys-polled"; poll-interval = <100>;
+                key-reset { label = "reset"; gpios = <&gpio0 0 GPIO_ACTIVE_LOW>; linux,code = <KEY_RESTART>; };
+            };
+        };
+        &usb { status = "okay"; };
+        &pcie0 { status = "okay"; };
+        &pcie1 { status = "okay"; };
+        &slot0 { status = "okay"; wifi@0,0 { compatible = "mediatek,mt76"; reg = <0x0000 0 0 0 0>; ieee80211-freq-limit = <2400000 2500000>; }; };
+        &slot1 { status = "okay"; wifi@0,0 { compatible = "mediatek,mt76"; reg = <0x0000 0 0 0 0>; ieee80211-freq-limit = <5000000 6000000>; }; };
+        &gmac0 { status = "okay"; };
+        &switch { status = "okay"; };
+        &gsw_port1 { status = "okay"; label = "lan1"; };
+        &gsw_port2 { status = "okay"; label = "lan2"; };
+        &gsw_port3 { status = "okay"; label = "lan3"; };
+        &gsw_port4 { status = "okay"; label = "lan4"; };
+        &nand { status = "okay"; econet,bmt; partitions { compatible = "fixed-partitions"; #address-cells = <1>; #size-cells = <1>;
+            partition@0 { label = "bootloader"; reg = <0x0 0x400000>; read-only; };
+            partition@400000 { label = "tclinux"; reg = <0x400000 0x2800000>; };
+            partition@2c00000 { label = "tclinux_slave"; reg = <0x2c00000 0x2800000>; };
+            partition@5400000 { label = "rootfs_data"; reg = <0x5400000 0x800000>; };
+            partition@dc00000 { label = "reservearea"; reg = <0xdc00000 0x400000>; };
+        }; };
+        EOF
+
+    - name: Add G84 to image makefile
+      run: |
+        cat >> target/linux/econet/image/en7528.mk << 'EOF'
+
+        define Device/iskratel_innbox-g84
+          DEVICE_VENDOR := Iskratel
+          DEVICE_MODEL := Innbox G84
+          DEVICE_DTS := en7528_iskratel_innbox-g84
+          DEVICE_PACKAGES := kmod-mt7603e kmod-mt7615e kmod-mt7663-firmware-ap \
+            econet-xpon-config econet-omcid kmod-leds-gpio
+          TRX_MODEL := Dewberry
+          IMAGES := tclinux.trx
+          IMAGE/tclinux.trx := append-kernel | lzma | tclinux-trx
+        endef
+        TARGET_DEVICES += iskratel_innbox-g84
+        EOF
+
+    - name: Configure
+      run: |
+        cat > .config << 'EOF'
+        CONFIG_TARGET_econet=y
+        CONFIG_TARGET_econet_en7528=y
+        CONFIG_TARGET_econet_en7528_DEVICE_iskratel_innbox-g84=y
+        CONFIG_TARGET_ROOTFS_INITRAMFS=y
+        CONFIG_TARGET_INITRAMFS_COMPRESSION_NONE=y
+        CONFIG_PACKAGE_kmod-econet-xpon=y
+        CONFIG_PACKAGE_econet-omcid=y
+        CONFIG_PACKAGE_econet-xpon-config=y
+        CONFIG_PACKAGE_kmod-mt7603e=y
+        CONFIG_PACKAGE_kmod-mt7615e=y
+        CONFIG_PACKAGE_kmod-mt7663-firmware-ap=y
+        CONFIG_PACKAGE_kmod-leds-gpio=y
+        CONFIG_PACKAGE_kmod-mt7530-mdio=y
+        CONFIG_PACKAGE_iptables=y
+        CONFIG_PACKAGE_ip6tables=y
+        CONFIG_PACKAGE_kmod-ipt-core=y
+        CONFIG_PACKAGE_firewall=y
+        CONFIG_PACKAGE_dnsmasq=y
+        CONFIG_PACKAGE_odhcp6c=y
+        CONFIG_PACKAGE_luci=n
+        CONFIG_PACKAGE_ppp=n
+        EOF
+        make defconfig
+
+    - name: Build
+      run: make -j$(nproc) V=s 2>&1 | tee build.log | tail -200
+
+    - name: Upload firmware
+      uses: actions/upload-artifact@v4
+      with:
+        name: openwrt-g84-initramfs
+        path: |
+          bin/targets/econet/en7528/*initramfs*
+          bin/targets/econet/en7528/sha256sums
+
+    - name: Upload build log on failure
+      if: failure()
+      uses: actions/upload-artifact@v4
+      with:
+        name: build-log
+        path: build.log
